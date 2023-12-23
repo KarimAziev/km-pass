@@ -1,0 +1,47 @@
+#+OPTIONS: ^:nil tags:nil num:nil
+
+* About
+
+Extra utils for =pass=.
+
+* Table of Contents                                       :TOC_2_gh:QUOTE:
+#+BEGIN_QUOTE
+- [[#about][About]]
+- [[#requirements][Requirements]]
+- [[#installation][Installation]]
+  - [[#with-use-package-and-straightel][With use-package and straight.el]]
+  - [[#manual-installation][Manual installation]]
+#+END_QUOTE
+
+* Requirements
+
+| Name  | Version |
+|-------+---------|
+| Emacs |    28.1 |
+
+
+* Installation
+
+** With use-package and straight.el
+#+begin_src elisp :eval no
+(use-package km-pass
+  :straight (km-pass
+             :repo "KarimAziev/km-pass"
+             :type git
+             :host github))
+#+end_src
+
+** Manual installation
+
+Download the source code and put it wherever you like, e.g. into =~/.emacs.d/km-pass/=
+
+#+begin_src shell :eval no
+git clone https://github.com/KarimAziev/km-pass.git ~/.emacs.d/km-pass/
+#+end_src
+
+Add the downloaded directory to the load path:
+
+#+begin_src elisp :eval no
+(add-to-list 'load-path "~/.emacs.d/km-pass/")
+(require 'km-pass)
+#+end_src
