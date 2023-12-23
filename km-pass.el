@@ -71,17 +71,19 @@ URL associated with a password entry."
 
 
 (defcustom km-pass-entry-actions '((?c "Copy password" km-pass-copy-password
-                                    :if km-pass-has-secret-p)
+                                       :if km-pass-has-secret-p)
                                    (?o "Copy Otp" password-store-otp-token-copy
-                                    :if
-                                    km-pass-has-otp-auth-p)
+                                       :if
+                                       km-pass-has-otp-auth-p)
+                                   (?a "Add Otp from image"
+                                       km-pass-append-otp-from-image
+                                       :if-not km-pass-has-otp-auth-p)
                                    (?u "Copy user name" km-pass-copy-username
-                                    :if km-pass-has-username-p)
+                                       :if km-pass-has-username-p)
                                    (?w "Copy other field value"
-                                    km-pass-copy-entry-field)
+                                       km-pass-copy-entry-field)
                                    (?e "Edit" password-store-edit)
                                    (?D "Delete" km-pass-delete-action)
-                                   (?a "Add" km-pass-add-action)
                                    (?r "Rename" km-pass-rename-action)
                                    (?g "Generate" km-pass-generate-action))
   "Actions for password-store entries with conditional display.
@@ -140,9 +142,11 @@ symbol."
               (sexp :tag "Sexp"))))))
   :group 'km-pass)
 
-(defun km-pass-add-action (key)
+;;;###autoload
+(defun km-pass-add-entry (key)
   "Ask for a new key based on KEY, then edit it."
-  (let ((new-key (read-string "New key: " key)))
+  (interactive)
+  (let ((new-key (read-string "Entry: " key)))
     (password-store-edit new-key)))
 
 (defun km-pass-generate-action (key)
@@ -231,24 +235,27 @@ the password store entry."
 
 
 ;;;###autoload
-(defun km-pass-append-otp-from-image (entry)
+(defun km-pass-append-otp-from-image (entry qr-image-filename)
   "Append OTP from an image to a password entry.
 
 Argument ENTRY is the name of the password store entry to which the OTP will be
-appended."
-  (interactive (list (password-store--completing-read)))
-  (let ((qr-image-filename (read-file-name "Screenshot with QR code: ")))
-    (with-temp-buffer
-      (condition-case nil
-          (call-process "zbarimg" nil t nil "-q" "--raw"
-                        qr-image-filename)
-        (error
-         (error "It seems you don't have `zbar-tools' installed")))
-      (km-pass-append-otp
-       entry
-       (buffer-substring (point-min)
-                         (point-max))))
-    (delete-file qr-image-filename)))
+appended.
+
+Argument QR-IMAGE-FILENAME is the filename of the image containing the QR code
+to be processed."
+  (interactive (list (password-store--completing-read t)
+                     (read-file-name "Screenshot with QR code: ")))
+  (with-temp-buffer
+    (condition-case nil
+        (call-process "zbarimg" nil t nil "-q" "--raw"
+                      qr-image-filename)
+      (error
+       (error "It seems you don't have `zbar-tools' installed")))
+    (km-pass-append-otp
+     entry
+     (buffer-substring (point-min)
+                       (point-max))))
+  (delete-file qr-image-filename))
 
 (defun km-pass-has-username-p (entry)
   "Check if ENTRY has a username field.
@@ -441,6 +448,8 @@ Argument ENTRY is the name of the password entry to copy the username from."
    (list
     (km-pass--completing-read t)))
   (km-pass-kill-new (km-pass-get-secret entry) entry))
+
+
 
 ;;;###autoload (autoload 'km-pass-mode-transient "km-pass" nil t)
 (transient-define-prefix km-pass-mode-transient ()
