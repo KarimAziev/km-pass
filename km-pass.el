@@ -1,4 +1,4 @@
-;;; km-pass.el --- Extra utils for pass -*- lexical-binding: t; -*-
+;;; km-pass.el --- Extra commands for managing password store (pass) entries -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023 Karim Aziiev <karim.aziiev@gmail.com>
 
@@ -26,7 +26,31 @@
 
 ;;; Commentary:
 
-;; Extra utils for pass
+;; This package provides additional commands for managing password store (pass)
+;; entries in Emacs.
+
+;; It includes commands for copying passwords, usernames, OTP
+;; tokens, and other fields, as well as generating, renaming, and deleting
+;; entries.
+
+;; The package also supports appending OTP tokens from images and URIs,
+;; and includes a transient menu for easy access to these commands.
+
+;;; Main commands
+
+;; M-x `km-pass-transient' - A transient menu for managing password store (pass) entries
+;; M-x `km-pass-mode-transient' - A transient menu for `pass-mode'.
+
+
+;;; Customization
+
+;; `km-pass-entry-actions'
+
+;; `km-pass-preview-file-extensions'
+
+;; `km-pass-url-fields'
+
+;; `km-pass-user-fields'
 
 ;;; Code:
 
@@ -68,6 +92,17 @@ entry that may contain a URL. These fields are used when attempting to extract a
 URL associated with a password entry."
   :group 'km-pass
   :type '(repeat (string :tag "Field name")))
+
+(defcustom km-pass-preview-file-extensions '("png" "jpg" "jpeg")
+  "List of file extensions to be previewed as images when reading OTP image file.
+
+Each element in the list should be a string representing a file
+extension that corresponds to an image format.
+
+This list is used to determine which files can be displayed in a temporary
+buffer for preview purposes."
+  :group 'km-pass
+  :type 'boolean)
 
 
 (defcustom km-pass-entry-actions '((?c "Copy password" km-pass-copy-password
@@ -163,7 +198,9 @@ Default PASSWORD-LENGTH is ‘password-store-password-length’."
     (password-store-remove key)))
 
 (defun km-pass-rename-action (key)
-  "Rename entry for KEY."
+  "Prompt for a new name and rename the password entry KEY to NEW-NAME.
+
+Argument KEY is the name of the password entry to be renamed."
   (let ((new-name (read-string (format "Rename `%s' to: " key) key)))
     (password-store-rename key new-name)))
 
@@ -216,7 +253,6 @@ store entry."
 Optional argument REQUIRE-MATCH determines whether the user must select an
 existing entry. If non-nil, the user is not allowed to exit unless the input
 matches one of the entries in the completion list."
-  
   (completing-read "Password entry: " (password-store-list) nil require-match))
 
 ;;;###autoload
@@ -233,18 +269,193 @@ the password store entry."
   (km-pass--store-otp-add-uri 'append entry otp-uri))
 
 
+(defun km-pass--minibuffer-get-metadata ()
+  "Return completion metadata for the current minibuffer input."
+  (completion-metadata
+   (buffer-substring-no-properties
+    (minibuffer-prompt-end)
+    (max (minibuffer-prompt-end)
+         (point)))
+   minibuffer-completion-table
+   minibuffer-completion-predicate))
+
+(defun km-pass--minibuffer-ivy-selected-cand ()
+  "Return a cons cell with completion category and the current candidate."
+  (when (and (memq 'ivy--queue-exhibit post-command-hook)
+             (boundp 'ivy-text)
+             (boundp 'ivy--length)
+             (boundp 'ivy-last)
+             (fboundp 'ivy--expand-file-name)
+             (fboundp 'ivy-state-current))
+    (cons
+     (completion-metadata-get (ignore-errors (km-pass--minibuffer-get-metadata))
+                              'category)
+     (ivy--expand-file-name
+      (if (and (> ivy--length 0)
+               (stringp (ivy-state-current ivy-last)))
+          (ivy-state-current ivy-last)
+        ivy-text)))))
+
+(defun km-pass--minibuffer-get-default-candidates ()
+  "Return a list of default completion candidates from the minibuffer."
+  (when (minibufferp)
+    (let* ((all (completion-all-completions
+                 (minibuffer-contents)
+                 minibuffer-completion-table
+                 minibuffer-completion-predicate
+                 (max 0 (- (point)
+                           (minibuffer-prompt-end)))))
+           (last (last all)))
+      (when last (setcdr last nil))
+      (cons
+       (completion-metadata-get (km-pass--minibuffer-get-metadata) 'category)
+       all))))
+
+(defun km-pass--get-minibuffer-get-default-completion ()
+  "Target the top completion candidate in the minibuffer.
+Return the category metadatum as the type of the target."
+  (when (and (minibufferp) minibuffer-completion-table)
+    (pcase-let* ((`(,category . ,candidates)
+                  (km-pass--minibuffer-get-default-candidates))
+                 (contents (minibuffer-contents))
+                 (top (if (test-completion contents
+                                           minibuffer-completion-table
+                                           minibuffer-completion-predicate)
+                          contents
+                        (let ((completions (completion-all-sorted-completions)))
+                          (if (null completions)
+                              contents
+                            (concat
+                             (substring contents
+                                        0 (or (cdr (last completions)) 0))
+                             (car completions)))))))
+      (cons category (or (car (member top candidates)) top)))))
+
+(defvar km-pass--minibuffer-targets-finders
+  '(km-pass--minibuffer-ivy-selected-cand
+    km-pass--get-minibuffer-get-default-completion)
+  "List of functions to find targets in the minibuffer.")
+
+(defun km-pass--minibuffer-get-current-candidate ()
+  "Return cons filename for current completion candidate."
+  (let (target)
+    (run-hook-wrapped
+     'km-pass--minibuffer-targets-finders
+     (lambda (fun)
+       (when-let ((result (funcall fun)))
+         (when (and (cdr-safe result)
+                    (stringp (cdr-safe result))
+                    (not (string-empty-p (cdr-safe result))))
+           (setq target result)))
+       (and target (minibufferp))))
+    target))
+
+(defun km-pass--minibuffer-exit-with-action (action)
+  "Call ACTION with current candidate and exit minibuffer."
+  (pcase-let ((`(,_category . ,current)
+               (km-pass--minibuffer-get-current-candidate)))
+    (progn (run-with-timer 0.1 nil action current)
+           (abort-minibuffers))))
+
+
+(defun km-pass--minibuffer-action-no-exit (action)
+  "Call ACTION with minibuffer candidate in its original window."
+  (pcase-let ((`(,_category . ,current)
+               (km-pass--minibuffer-get-current-candidate)))
+    (with-minibuffer-selected-window
+      (funcall action current))))
+
+(defun km-pass-preview--otp-image (file)
+  "Display the contents of FILE in a temporary buffer if it exists and is an image.
+
+Argument FILE is the path to the file to be previewed."
+  (when (and file (file-exists-p file)
+             (member (file-name-extension file) km-pass-preview-file-extensions))
+    (let ((buffer (get-buffer-create "*km-pass-preview*")))
+      (letrec ((hook
+                (lambda ()
+                  (remove-hook 'minibuffer-exit-hook hook t)
+                  (when (buffer-live-p buffer)
+                    (kill-buffer buffer)))))
+        (when (active-minibuffer-window)
+          (with-selected-window
+              (active-minibuffer-window)
+            (with-current-buffer (current-buffer)
+              (add-hook 'minibuffer-exit-hook hook 1 t))))
+        (with-current-buffer buffer
+          (with-current-buffer-window buffer
+              (cons 'display-buffer-in-direction
+                    '((window-height . fit-window-to-buffer)))
+              (lambda (window _value)
+                (with-selected-window window
+                  (setq buffer-read-only t)
+                  (let ((inhibit-read-only t))
+                    (unwind-protect
+                        (read-key-sequence "")
+                      (quit-restore-window window 'kill)
+                      (setq unread-command-events
+                            (append (this-single-command-raw-keys)
+                                    unread-command-events))))))
+            (insert-file-contents file)
+            (let ((buffer-file-name file))
+              (ignore-errors
+                (delay-mode-hooks (set-auto-mode)
+                                  (font-lock-ensure))))
+            (setq header-line-format
+                  (abbreviate-file-name file))))))))
+
+(defvar km-pass-minibuffer-file-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-j")
+                #'km-pass-minibuffer-preview-file)
+    map))
+
+(defun km-pass-minibuffer-preview-file ()
+  "Preview the selected file in the minibuffer without exiting."
+  (interactive)
+  (km-pass--minibuffer-action-no-exit
+   'km-pass-preview--otp-image))
+
+(defun km-pass--read-otp-image-file (prompt &optional dir default-filename
+                                            mustmatch initial predicate)
+  "Read a file name with PROMPT, optionally using DIR and DEFAULT-FILENAME.
+
+Argument PROMPT is the string to prompt with.
+
+Optional argument DIR is the directory to start in.
+
+Optional argument DEFAULT-FILENAME is the default file name to use.
+
+Optional argument MUSTMATCH specifies whether an existing file must be matched.
+
+Optional argument INITIAL is the initial input.
+
+Optional argument PREDICATE is a function to filter possible completions."
+  (minibuffer-with-setup-hook
+      (lambda ()
+        (when (minibufferp)
+          (let ((map (make-composed-keymap km-pass-minibuffer-file-map
+                                           (current-local-map))))
+            (use-local-map map))))
+    (read-file-name prompt
+                    dir
+                    default-filename
+                    mustmatch
+                    initial predicate)))
 
 ;;;###autoload
 (defun km-pass-append-otp-from-image (entry qr-image-filename)
-  "Append OTP from an image to a password entry.
+  "Append OTP from an image QR-IMAGE-FILENAME to a password ENTRY.
 
-Argument ENTRY is the name of the password store entry to which the OTP will be
-appended.
+ENTRY is the name of the password store entry to which the OTP will be appended.
 
-Argument QR-IMAGE-FILENAME is the filename of the image containing the QR code
-to be processed."
+QR-IMAGE-FILENAME is the filename of the image containing the QR code to be
+processed.
+
+During minibuffer completion of an image, you can preview it by typing
+ \\<km-pass-minibuffer-file-map>\\[km-pass-minibuffer-preview-file]."
   (interactive (list (password-store--completing-read t)
-                     (read-file-name "Screenshot with QR code: ")))
+                     (km-pass--read-otp-image-file "Screenshot with QR code: ")))
   (with-temp-buffer
     (condition-case nil
         (call-process "zbarimg" nil t nil "-q" "--raw"
@@ -290,8 +501,6 @@ Optional argument PROMPT is the message displayed after copying, if provided."
     (kill-new value)
     (message  "Copied %s" (or prompt "")))
   value)
-
-
 
 
 ;;;###autoload
@@ -450,43 +659,49 @@ Argument ENTRY is the name of the password entry to copy the username from."
   (km-pass-kill-new (km-pass-get-secret entry) entry))
 
 
-
 ;;;###autoload (autoload 'km-pass-mode-transient "km-pass" nil t)
 (transient-define-prefix km-pass-mode-transient ()
-  "Define a transient for `pass-mode'."
-  [("w" "Copy password" pass-copy)
-   ("f" "Copy field" pass-copy-field)
-   ("b" "Copy username" pass-copy-username)
-   ("u" "Copy url" pass-copy-url)
-   ""
-   ("i" "Insert" pass-insert)
-   ("I" "Generate" pass-insert-generated)
-   ("r" "Rename" pass-rename)
-   ("k" "Delete" pass-kill)
-   ("e" "Edit" pass-edit)
-   ("j" "Jump to Entry" pass-goto-entry)
-   ("U" "Browse url" pass-browse-url)
-   ("g" "Update" pass-update-buffer)
-   ("o" "OTP Support" pass-otp-options)
-   ("RET" "View entry" pass-view)]
-  [("n" "Next" pass-next-entry :transient t)
-   ("p" "Previous" pass-prev-entry :transient t)
-   ("M-n" "Next dir" pass-next-directory :transient t)
-   ("M-p" "Previous dir" pass-prev-directory :transient t)])
+  "A transient menu for `pass-mode'."
+  [[("w" "Copy password" pass-copy)
+    ("f" "Copy field" pass-copy-field)
+    ("b" "Copy username" pass-copy-username)
+    ("u" "Copy url" pass-copy-url)
+    ""
+    ("i" "Insert" pass-insert)
+    ("I" "Generate" pass-insert-generated)
+    ("r" "Rename" pass-rename)
+    ("k" "Delete" pass-kill)
+    ("e" "Edit" pass-edit)
+    ("j" "Jump to Entry" pass-goto-entry)
+    ("U" "Browse url" pass-browse-url)
+    ("g" "Update" pass-update-buffer)
+    ("o" "OTP Support" pass-otp-options)
+    ("RET" "View entry" pass-view)]
+   [("n" "Next" pass-next-entry :transient t)
+    ("p" "Previous" pass-prev-entry :transient t)
+    ("M-n" "Next dir" pass-next-directory :transient t)
+    ("M-p" "Previous dir" pass-prev-directory :transient t)]])
 
 ;;;###autoload (autoload 'km-pass-transient "km-pass" nil t)
 (transient-define-prefix km-pass-transient ()
-  "Define a transient command menu for password operations."
+  "A transient menu for managing password store (pass) entries."
   ["Passwords"
-   ("a" "Read entry and then prompt for action" km-pass-act)
-   ("w" "Copy password" km-pass-copy-password)
-   ("o" "Copy OTP" password-store-otp-token-copy)
-   ("u" "copy [u]ser" km-pass-copy-username)
-   ("U" "Browse url" password-store-url)
-   ("v" "Copy version" password-store-version)
-   ("R" "Rename" password-store-rename)
-   ("D" "Delete" password-store-remove)
-   ("p" "open pass" pass)])
+   ["Copy"
+    ("w" "Password" km-pass-copy-password)
+    ("o" "OTP" password-store-otp-token-copy)
+    ("u" "Username" km-pass-copy-username)
+    ("f" "Other field" password-store-copy-field)
+    ""
+    ("p" "Open pass" pass)
+    ("U" "Browse URL" password-store-url)]
+   [("i" "Insert" password-store-insert)
+    ("g" "Generate" password-store-generate)
+    ("R" "Rename" password-store-rename)
+    ("D" "Delete" password-store-remove)
+    ("a" "Append OTP from an image" km-pass-append-otp-from-image)
+    ("r" "Append OTP from URI" km-pass-append-otp)
+    ""
+    ("." "Read entry and prompt for the action" km-pass-act)]])
 
 
 (provide 'km-pass)
