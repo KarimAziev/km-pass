@@ -355,7 +355,7 @@ Return the category metadatum as the type of the target."
     (run-hook-wrapped
      'km-pass--minibuffer-targets-finders
      (lambda (fun)
-       (when-let ((result (funcall fun)))
+       (when-let* ((result (funcall fun)))
          (when (and (cdr-safe result)
                     (stringp (cdr-safe result))
                     (not (string-empty-p (cdr-safe result))))
@@ -530,7 +530,7 @@ error if the ENTRY is not found."
   (setq fields (if (proper-list-p fields)
                    fields
                  (list fields)))
-  (if-let ((data (if (listp entry)
+  (if-let* ((data (if (listp entry)
                      entry
                    (auth-source-pass-parse-entry entry))))
       (let ((key)
