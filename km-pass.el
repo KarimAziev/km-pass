@@ -470,16 +470,21 @@ During minibuffer completion of an image, you can preview it by typing
   (interactive (list (password-store--completing-read t)
                      (km-pass--read-otp-image-file "Screenshot with QR code: ")))
   (with-temp-buffer
-    (condition-case nil
-        (call-process "zbarimg" nil t nil "-q" "--raw"
-                      qr-image-filename)
-      (error
-       (error "It seems you don't have `zbar-tools' installed")))
-    (km-pass-append-otp
-     entry
-     (buffer-substring (point-min)
-                       (point-max))))
-  (delete-file qr-image-filename))
+    (let* ((status
+            (condition-case nil
+                (call-process "zbarimg" nil t nil "-q" "--raw"
+                              qr-image-filename)
+              (error
+               (error "It seems you don't have `zbar-tools' installed"))))
+           (output (buffer-substring (point-min)
+                                     (point-max))))
+      (if (not (and (numberp status)
+                    (zerop status)))
+          (message output)
+        (km-pass-append-otp
+         entry
+         output)
+        (delete-file qr-image-filename)))))
 
 (defun km-pass-has-username-p (entry)
   "Check if ENTRY has a username field.
